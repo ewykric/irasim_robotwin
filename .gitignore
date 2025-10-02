@@ -3,7 +3,6 @@
 *.git
 *.vscode
 *.log
-pretrained_models/stabilityai
 results
 wandb
 robotwin_ckpt/*.pt
