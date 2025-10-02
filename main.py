@@ -187,9 +187,13 @@ def main(args):
 
     assert not (args.evaluate_checkpoint == False and args.do_evaluate)
     if args.evaluate_checkpoint:
-        checkpoint = torch.load(args.evaluate_checkpoint, map_location=lambda storage, loc: storage)
+        # checkpoint = torch.load(args.evaluate_checkpoint, map_location=lambda storage, loc: storage)
+        checkpoint = torch.load(args.evaluate_checkpoint, map_location=lambda storage, loc: storage, weights_only=False)
         train_steps = int(args.evaluate_checkpoint.split('/')[-1][0:-3])
+        print("got here")
+
         if "ema" in checkpoint:  # supports checkpoints from train.py
+            print("using ema")
             logger.info('Using ema ckpt!')
             checkpoint = checkpoint["ema"]
 
@@ -206,6 +210,11 @@ def main(args):
         model_dict.update(pretrained_dict)
         model.load_state_dict(model_dict)
         logger.info('Successfully load model at {}!'.format(args.evaluate_checkpoint))
+
+
+
+
+
 
 
     model = DDP(model.to(device), device_ids=[local_rank])
@@ -278,20 +287,48 @@ def main(args):
 
     # Potentially load in the weights and states from a previous save
     if args.resume_from_checkpoint:
-        checkpoint_path = os.path.join(args.resume_from_checkpoint, 'checkpoints')
+        checkpoint_path = args.resume_from_checkpoint #os.path.join(args.resume_from_checkpoint, 'checkpoints')
         dirs = os.listdir(checkpoint_path)
         dirs = [d for d in dirs if d.endswith("pt")]
         dirs = sorted(dirs, key=lambda x: int(x.split(".")[0]))
         path = dirs[-1]
         checkpoint_path = os.path.join(checkpoint_path,path) 
         logger.info(f"Resuming from checkpoint {checkpoint_path}")
-        checkpoint = torch.load(checkpoint_path, map_location=lambda storage, loc: storage)
+        checkpoint = torch.load(checkpoint_path, map_location=lambda storage, loc: storage, weights_only=False)
         if "ema" in checkpoint:  # supports checkpoints from train.py
             logger.info('Using ema ckpt!')
             # checkpoint = checkpoint["ema"]
+       
+        # 权重扩展：处理embed_state层从7维到14维的适配
+        def expand_embed_state_weights(state_dict, dict_name):
+            if "embed_state.fc1.weight" in state_dict:
+                old_weight = state_dict["embed_state.fc1.weight"]  # [4608, 7]
+                if old_weight.shape[1] == 7:  # 检查是否为单臂权重
+                    logger.info(f"Expanding {dict_name} embed_state.fc1.weight from {old_weight.shape} to [4608, 14]")
+                    # 创建新的14维权重：前7维复制原权重，后7维初始化为0
+                    new_weight = torch.zeros(old_weight.shape[0], 14, dtype=old_weight.dtype, device=old_weight.device)
+                    new_weight[:, :7] = old_weight  # 复制单臂权重
+                    # new_weight[:, 7:] = 0.0  # 双臂权重初始化为0
+                    new_weight[:, 7:] = old_weight  # 左右双臂权重都初始化为单臂权重
+                    state_dict["embed_state.fc1.weight"] = new_weight
+                    logger.info(f"Successfully expanded {dict_name} embed_state.fc1.weight for dual-arm support")
+            
+            if "embed_state.fc1.bias" in state_dict:
+                old_bias = state_dict["embed_state.fc1.bias"]
+                logger.info(f"{dict_name} embed_state.fc1.bias shape: {old_bias.shape}")
+        
+        # 获取dual_arm模式
+        dual_arm_mode = getattr(args, 'dual_arm', False)
+
+        if dual_arm_mode:
+            # 扩展model和ema的权重
+            expand_embed_state_weights(checkpoint["model"], "model")
+            expand_embed_state_weights(checkpoint["ema"], "ema")
+        else:
+            opt.load_state_dict(checkpoint["opt"])
+       
         model.module.load_state_dict(checkpoint["model"])
         ema.load_state_dict(checkpoint["ema"])
-        opt.load_state_dict(checkpoint["opt"])
         train_steps = int(path.split(".")[0])
         first_epoch = int(train_steps // num_update_steps_per_epoch)
         resume_step = (train_steps % num_update_steps_per_epoch)*args.gradient_accumulation_steps
@@ -386,7 +423,7 @@ def main(args):
                         avg_loss = avg_loss.item() / dist.get_world_size()
                         if rank == 0:
                             wandb.log({'All Reduce Val Loss': avg_loss}, train_steps)
-                            validate_video_generation(val_dataset, args, vae, ema, device, train_steps, videos_dir, wandb_name)
+                            #validate_video_generation(val_dataset, args, vae, ema, device, train_steps, videos_dir, wandb_name)
                     dist.barrier()
 
                 # Save IRASim checkpoint:
@@ -420,6 +457,9 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="./configs/train/bridge/frame_ada.yaml")
+    parser.add_argument("--data_config", type=str, required=True, help="Data config file name (e.g., data_bridge.yaml)")
+    # example: python main.py --config configs/evaluation/droid/frame_ada.yaml --data_config data_bridge.yaml
+
     args = parser.parse_args()
     args = get_args(args)
     main(args)

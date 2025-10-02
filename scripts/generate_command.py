@@ -13,8 +13,10 @@
 # limitations under the License.
 
 
-datasets = ['bridge','rt1','languagetable']
-methods = ['frame_ada','video_ada','lvdm']
+# datasets = ['bridge','rt1','languagetable']
+datasets = ['robotwin']
+# methods = ['frame_ada','video_ada','lvdm']
+methods = ['frame_ada']
 
 for dataset in datasets:
     for method in methods:
@@ -32,6 +34,6 @@ for dataset in datasets:
 
         commands_joined = "\n".join(commands)
 
-        with open(f'./scripts/generate_long_video_{dataset}_{method}.sh', 'w') as file:
+        with open(f'/mnt/wyk/IRASim/scripts/generate_long_video_{dataset}_{method}.sh', 'w') as file:
             print(commands_joined,file=file)
 

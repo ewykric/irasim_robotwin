@@ -47,7 +47,7 @@ def main(args,rank,thread,thread_num):
     os.makedirs(episode_videos_dir, exist_ok=True)
 
     if args.evaluate_checkpoint:
-        checkpoint = torch.load(args.evaluate_checkpoint, map_location=lambda storage, loc: storage)
+        checkpoint = torch.load(args.evaluate_checkpoint, map_location=lambda storage, loc: storage, weights_only=False)
         if "ema" in checkpoint:
             print('Using ema ckpt!')
             checkpoint = checkpoint["ema"]
@@ -72,7 +72,8 @@ def main(args,rank,thread,thread_num):
         t_videos = ((videos / 2.0 + 0.5).clamp(0, 1) * 255).detach().to(dtype=torch.uint8).cpu().contiguous()
         t_videos = rearrange(t_videos, 'f c h w -> f h w c')
         t_videos = t_videos.numpy()
-        writer = imageio.get_writer(filename, fps=4) 
+        writer = imageio.get_writer(filename, fps=20) 
+        # writer = imageio.get_writer(filename, fps=15)
         for frame in t_videos:
             writer.append_data(frame) 
         writer.close()
@@ -100,30 +101,90 @@ def main(args,rank,thread,thread_num):
                     latent_video = torch.load(file)['obs']
             else:
                 video_path = os.path.join(args.video_path, ann['videos'][0]['video_path'])
-                latent_video_path = os.path.join(args.video_path, ann['latent_videos'][0]['latent_video_path'])
-                with open(latent_video_path, 'rb') as file:
-                    latent_video = torch.load(file)
-
+            
             video_reader = imageio.get_reader(video_path)
-            video_tensor = []
+            video_frames = []
             for frame in video_reader:
-                frame_tensor = torch.tensor(frame)
-                video_tensor.append(frame_tensor)
+                frame_tensor = torch.tensor(frame).permute(2, 0, 1)  # HWC -> CHW
+                video_frames.append(frame_tensor)
             video_reader.close()
-            video_tensor = torch.stack(video_tensor)
+            video_tensor = torch.stack(video_frames).unsqueeze(0)  # (1, F, C, H, W)
+            
+            # 使用VAE编码，参考短视频脚本的逻辑
+            video_tensor = video_tensor.to(device).float() / 255.0 * 2.0 - 1.0  # 归一化到[-1,1]
+            # 添加resize操作，确保编码后的潜在表示尺寸是32x40
+            # VAE的缩放因子是8，所以需要resize到256x320
+            resize_transform = T.Resize((256, 320), antialias=True)
+            b, f, c, h, w = video_tensor.shape
+            # 对每一帧进行resize
+            resized_frames = []
+            for i in range(f):
+                resized_frame = resize_transform(video_tensor[0, i])  # 处理单帧
+                resized_frames.append(resized_frame)
+            video_tensor = torch.stack(resized_frames).unsqueeze(0)  # 重新组装
+            
+            b, f, c, h, w = video_tensor.shape
+            video_flat = rearrange(video_tensor, 'b f c h w -> (b f) c h w').contiguous()
+            
+            # 分批编码以避免内存问题
+            stride = getattr(args, 'local_val_batch_size', 8)
+            encode_video_list = []
+            for i in range(0, video_flat.size(0), stride):
+                batch_frames = video_flat[i:i+stride].to(device)
+                with torch.no_grad():  # 避免梯度计算
+                    encoded = vae.encode(batch_frames).latent_dist.sample().mul_(vae.config.scaling_factor)
+                encode_video_list.append(encoded.cpu()) # 立即移到CPU释放GPU内存
+            
+            encoded_video = torch.cat(encode_video_list, dim=0)
+            latent_video = rearrange(encoded_video, '(b f) c h w -> b f c h w', b=b, f=f).squeeze(0)
 
             if args.model == 'VDM':
                 latent_video = video_tensor
                 latent_video = latent_video.permute(0, 3, 1, 2)
                 latent_video = val_dataset.preprocess(latent_video)
 
-            total_frame = latent_video.size()[0]
+            # total_frame = latent_video.size()[0]
+            
+            # 限制frame_ids不超过状态数据的长度
+            # max_available_frames = len(ann['state'])
+            if 'state' in ann:
+                max_available_frames = len(ann['state'])
+            else:
+                # If no state, use action count (actions are deltas: frames = actions + 1)
+                max_available_frames = len(ann.get('action', [])) + 1
+                print(max_available_frames)
+            
+            # total_frame = min(total_frame, max_available_frames)
+            # use json state/action length to generate long video
+            total_frame = max_available_frames
+            
             frame_ids = list(range(total_frame))
             if args.dataset == 'languagetable':
                 action = torch.tensor(ann['actions'])
             else:
-                arm_states, gripper_states = val_dataset._get_all_robot_states(ann, frame_ids)
-                action = val_dataset._get_all_actions(arm_states, gripper_states, args.accumulate_action)
+                # if 'state' in ann:
+                #     print("Use json state in generate_long_video!")
+                #     arm_states, gripper_states = val_dataset._get_all_robot_states(ann, frame_ids)
+                #     action = val_dataset._get_all_actions(arm_states, gripper_states, args.accumulate_action)
+                #     print("The first arm state: ", arm_states[0])
+                #     # action = val_dataset._get_actions_from_states(arm_states, gripper_states)
+                # else:
+                print("Use json action directly in generate_long_video!")
+                # action = torch.tensor(ann['action'])
+                all_action_raw = torch.tensor(ann['action']) # (Bs, 2, 7)
+                action_raw = all_action_raw[frame_ids[:-1]]
+                Bs = action_raw.shape[0]
+                action = torch.zeros(Bs, 14)
+                action[:, :7] = action_raw[:, 0, :7]
+                action[:, 7:14] = action_raw[:, 1, :7]
+                    # 修正夹爪状态：从 continuous_gripper_state 中获取第7维
+                    # if 'continuous_gripper_state' in ann:
+                    #     continuous_gripper_states = torch.tensor(ann['continuous_gripper_state'])
+                    #     # 获取对应帧的夹爪状态
+                    #     #gripper_states_for_frames = continuous_gripper_states[frame_ids]
+                    #     gripper_states_for_frames = continuous_gripper_states[frame_ids[:-1]] #TODO: Kevin fix
+                    #     # 更新 action 的第7维（索引6）为正确的夹爪状态
+                    #     action[:, 6] = gripper_states_for_frames[:]  # 跳过第一帧，因为 action 比 state 少一帧
 
             action = action*val_dataset.c_act_scaler
 
@@ -183,6 +244,7 @@ def main(args,rank,thread,thread_num):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="./configs/evaluation/rt1/frame_ada.yaml")
+    parser.add_argument("--data_config", type=str, default="data_droid.yaml")
     parser.add_argument("--rank", type=int, default=0)
     parser.add_argument("--thread", type=int, default=0)
     parser.add_argument("--thread-num", type=int, default=1)

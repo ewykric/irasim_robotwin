@@ -256,7 +256,11 @@ class IRASim(nn.Module):
                 self.embed_state = Mlp(in_features=self.state_dim, hidden_features = hidden_size*4, out_features=hidden_size, act_layer=approx_gelu, drop=0)
                 self.mask_emb_fn = nn.Embedding(num_embeddings=1, embedding_dim=hidden_size)
             elif args.dataset == 'bridge':
-                self.state_dim = 7
+                dual_arm = getattr(args, 'dual_arm', False)
+                if not dual_arm:
+                    self.state_dim = 7
+                else:
+                    self.state_dim = 14
                 approx_gelu = lambda: nn.GELU(approximate="tanh")
                 self.embed_state = Mlp(in_features=self.state_dim, hidden_features = hidden_size*4, out_features=hidden_size, act_layer=approx_gelu, drop=0)
                 self.mask_emb_fn = nn.Embedding(num_embeddings=1, embedding_dim=hidden_size)

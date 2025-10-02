@@ -1,0 +1,2 @@
+robotwin_ckpt/* filter=lfs diff=lfs merge=lfs -text
+pretrained_models/* filter=lfs diff=lfs merge=lfs -text

@@ -76,7 +76,8 @@ def update_paths(args):
     args.vae_model_path = os.path.join(args.project_dir, args.vae_model_path)
 
     if args.evaluate_checkpoint:
-        args.evaluate_checkpoint = os.path.join(args.dataset_dir, args.evaluate_checkpoint)
+        # args.evaluate_checkpoint = os.path.join(args.dataset_dir, args.evaluate_checkpoint)
+        args.evaluate_checkpoint = os.path.join(args.project_dir, args.evaluate_checkpoint)
     if args.resume_from_checkpoint:
         args.resume_from_checkpoint = os.path.join(args.results_dir, args.resume_from_checkpoint)
 
@@ -97,7 +98,8 @@ def update_paths(args):
     
 
 def get_args(args):
-    data_config = OmegaConf.load("configs/base/data.yaml")
+    data_config_path = f"configs/base/{args.data_config}"
+    data_config = OmegaConf.load(data_config_path)
     diffusion_config = OmegaConf.load("configs/base/diffusion.yaml")
     config = OmegaConf.load(args.config)
     config = OmegaConf.merge(data_config, config)
@@ -193,7 +195,7 @@ def clip_grad_norm_(
                 'this error and scale the gradients by the non-finite norm anyway, '
                 'set `error_if_nonfinite=False`')
         clip_coef = max_norm / (total_norm + 1e-6)
-        # Note: multiplying by the clamped coef is redundant when the coef is clamped to 1, but doing so
+        # Note: multiplying by the \clamped coef is redundant when the coef is clamped to 1, but doing so
         # avoids a `if clip_coef < 1:` conditional which can require a CPU <=> device synchronization
         # when the gradients do not reside in CPU memory.
         clip_coef_clamped = torch.clamp(clip_coef, max=1.0)
